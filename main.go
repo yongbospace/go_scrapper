@@ -19,7 +19,7 @@ type jazzItem struct {
 }
 
 var baseUrl string = "https://www.jazzedmagazine.com/"
-var itemSearch string = "guitar"
+var itemSearch string = "" //"guitar"
 
 func main() {
 	var items []jazzItem
