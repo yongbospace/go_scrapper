@@ -1,16 +1,15 @@
 package main
 
 import (
-	"encoding/csv"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
+	ccsv "github.com/tsak/concurrent-csv-writer"
 )
 
 type jazzItem struct {
@@ -20,42 +19,33 @@ type jazzItem struct {
 }
 
 var baseUrl string = "https://www.jazzedmagazine.com/"
+var itemSearch string = "guitar"
 
 func main() {
 	var items []jazzItem
-	totalPages := 6 //getLastPage()
+	extractC := make(chan []jazzItem)
+	totalPages := getLastPage()
+	fmt.Println("getLastPage: ", totalPages)
+
 	for i := 1; i < totalPages; i++ {
-		extractedItems := getPage(i)
+		go getPage(i, extractC)
+
+	}
+
+	for i := 1; i < totalPages; i++ {
+		extractedItems := <-extractC
 		items = append(items, extractedItems...)
-
 	}
-	writeItems(items)
 	fmt.Println("Done, extracted ", len(items))
+
+	writeItems(items)
+	fmt.Println("Done Wrote :", len(items))
 }
 
-func writeItems(items []jazzItem) {
-	file, err := os.Create("jazz.csv")
-	checkErr(err)
-
-	w := csv.NewWriter(file)
-	defer w.Flush()
-
-	headers := []string{"Title", "Date", "Url"}
-
-	errWriteHeader := w.Write(headers)
-	checkErr(errWriteHeader)
-
-	for _, item := range items {
-		itemSlice := []string{item.title, item.date, item.url}
-		errWriteItems := w.Write(itemSlice)
-		checkErr(errWriteItems)
-
-	}
-}
-
-func getPage(page int) []jazzItem {
+func getPage(page int, mainC chan<- []jazzItem) {
 	var items []jazzItem
-	pageUrl := baseUrl + "page/" + strconv.Itoa(page) + "/?s="
+	c := make(chan jazzItem)
+	pageUrl := baseUrl + "page/" + strconv.Itoa(page) + "/?s=" + itemSearch
 	fmt.Println("Requesting: ", pageUrl)
 	res, err := http.Get(pageUrl)
 	checkErr(err)
@@ -66,19 +56,24 @@ func getPage(page int) []jazzItem {
 	doc, err := goquery.NewDocumentFromReader(res.Body)
 	checkErr(err)
 
-	doc.Find(".archive>li").Each(func(i int, s *goquery.Selection) {
-		item := extractMusic(s)
-		items = append(items, item)
+	searchArticles := doc.Find(".archive>li")
+	searchArticles.Each(func(i int, s *goquery.Selection) {
+		go extractArticles(s, c)
 	})
-	return items
+
+	for i := 0; i < searchArticles.Length(); i++ {
+		item := <-c
+		items = append(items, item)
+	}
+	mainC <- items
 }
 
-func extractMusic(s *goquery.Selection) jazzItem {
+func extractArticles(s *goquery.Selection, c chan<- jazzItem) {
 	title := cleanString(s.Find("h2").Text())
 	date := cleanString(s.Find("span").Text())
 	url, _ := s.Find("a").Attr("href")
 
-	return jazzItem{
+	c <- jazzItem{
 		title: title,
 		date:  date,
 		url:   url,
@@ -87,7 +82,7 @@ func extractMusic(s *goquery.Selection) jazzItem {
 
 func getLastPage() int {
 	pages := 0
-	res, err := http.Get(baseUrl + "?s=")
+	res, err := http.Get(baseUrl + "?s=" + itemSearch)
 	checkErr(err)
 	checkStatus(res)
 
@@ -104,6 +99,27 @@ func getLastPage() int {
 	})
 
 	return pages
+}
+
+func writeItems(items []jazzItem) {
+	csv, err := ccsv.NewCsvWriter("jazz.csv")
+	checkErr(err)
+
+	defer csv.Close()
+
+	csv.Write([]string{"Title", "Date", "Url"})
+
+	done := make(chan bool)
+
+	for _, item := range items {
+		go func(item jazzItem) {
+			csv.Write([]string{item.title, item.date, item.url})
+			done <- true
+		}(item)
+	}
+	for i := 0; i < len(items); i++ {
+		<-done
+	}
 }
 
 func checkErr(err error) {
